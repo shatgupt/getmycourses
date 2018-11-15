@@ -1,0 +1,18 @@
+{
+    "files.eol": "\n",
+    "editor.formatOnType": true,
+    "editor.formatOnSave": true,
+    "terminal.integrated.copyOnSelection": true,
+    "terminal.integrated.shell.windows": "C:/WINDOWS/System32/wsl.exe",
+    "python.formatting.provider": "black",
+    "python.linting.flake8Enabled": true,
+    "python.pythonPath": "~/.virtualenvs/getmycourses/Scripts/python.exe",
+    "[python]": {
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": true
+        }
+    },
+    "python.linting.flake8Args": [
+        "--max-line-length=88"
+    ]
+}
