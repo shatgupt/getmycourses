@@ -1,3 +1,6 @@
+import json
+import logging
+import os
 import re
 import urllib.request
 from http.cookiejar import CookieJar
@@ -6,6 +9,7 @@ import lxml.html
 from flask import Flask, abort, jsonify
 from lxml.cssselect import CSSSelector
 
+CLASSLIST_DIR = "/tmp/classlist/"
 CURRENT_TERM = "2191"  # Spring 2019
 ASU_BASE_URL = "https://webapp4.asu.edu"
 HEADERS = {
@@ -27,6 +31,24 @@ cj = CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 
 app = Flask(__name__)
+prev_classlist = {}
+
+if not os.path.isdir(CLASSLIST_DIR):
+    os.mkdir(CLASSLIST_DIR)
+
+
+def load_previous_data(department):
+    fname = f"{CLASSLIST_DIR}{department}.json"
+
+    if not os.path.isfile(fname):
+        # try to download from Cloud Storage
+        logging.info(f"Downloading previous data from Storage: {department}.json")
+
+    try:
+        with open(fname) as f:
+            prev_classlist[department] = json.load(f)
+    except Exception as e:
+        logging.warn(f"Couldn't load json {fname} with error: {e}")
 
 
 def get_html(url):
@@ -38,9 +60,6 @@ def get_html(url):
 
 
 def extract_class_seats(html):
-    total_seats = None
-    open_seats = None
-    non_reserved_open_seats = None
     matches = re.findall(
         (
             r"<!-- Open seats -->[\s\S]*Open: <\/label>\D*(\d*)&nbsp;of&nbsp;(\d*)"
@@ -50,21 +69,12 @@ def extract_class_seats(html):
     )
     if not matches:
         raise RuntimeError("No regex match for open seats!")
-    open_seats = matches[0][0]
-    total_seats = matches[0][1]
-    non_reserved_open_seats = open_seats
+    seats = {"open_seats": matches[0][0], "total_seats": matches[0][1]}
     matches = re.findall(r"Non Reserved Available Seats:\D*(\d*)", html)
     if not matches:
-        raise RuntimeError("No regex match for Non Reserved Available Seats!")
-    non_reserved_open_seats = matches[0]
-
-    return jsonify(
-        {
-            "total_seats": total_seats,
-            "open_seats": open_seats,
-            "non_reserved_open_seats": non_reserved_open_seats,
-        }
-    )
+        return seats
+    seats["non_reserved_open_seats"] = matches[0]
+    return seats
 
 
 def extract_classlist_seats(column):
@@ -85,7 +95,6 @@ def extract_classlist_seats(column):
 
 
 def extract_classlist_info(html):
-    classlist = {}
     tree = lxml.html.fromstring(html)
     get_table = CSSSelector("table#CatalogList")
     table = get_table(tree)
@@ -96,9 +105,11 @@ def extract_classlist_info(html):
     rows = get_rows(table)
     if not rows:
         return "No rows in table!"
+
     # Extract info from rows
     # split and join to remove the \t and \n between texts
     get_columns = CSSSelector("td")
+    classlist = {}
     for row in rows:
         columns = get_columns(row)
         class_num = " ".join(columns[2].text_content().split())
@@ -111,7 +122,7 @@ def extract_classlist_info(html):
         seats = extract_classlist_seats(columns[10])
         classlist[class_num] = {**classlist[class_num], **seats}
 
-    return jsonify(classlist)
+    return classlist
 
 
 # https://webapp4.asu.edu/catalog/coursedetails?r=30298
@@ -119,19 +130,44 @@ def handle_get_class(request):
     class_num = request.args.get("class")
     if not class_num:
         return abort(400)
+
     filters = f"t={CURRENT_TERM}&r={class_num}"
     html = get_html(f"{ASU_BASE_URL}/catalog/coursedetails?{filters}")
-    return extract_class_seats(html)
+    seats = extract_class_seats(html)
+    return jsonify(seats)
 
 
 # https://webapp4.asu.edu/catalog/classlist?e=all&l=grad&s=CSE
 def handle_get_classlist(request):
-    dept = request.args.get("dept")
-    if not dept:
+    department = request.args.get("department")
+    if not department:
         return abort(400)
-    filters = f"t={CURRENT_TERM}&l=grad&hon=F&promod=F&e=all&s={dept}&page=1"
+    if not prev_classlist.get(department):
+        prev_classlist[department] = {}
+        load_previous_data(department)
+
+    filters = f"t={CURRENT_TERM}&l=grad&hon=F&promod=F&e=all&s={department}&page=1"
     html = get_html(f"{ASU_BASE_URL}/catalog/myclasslistresults?{filters}")
-    return extract_classlist_info(html)
+    classlist = extract_classlist_info(html)
+
+    updated_classlist = {}
+    # check if there is any updated class
+    for class_num, class_info in classlist.items():
+        if class_info != prev_classlist[department].get(class_num):
+            updated_classlist[class_num] = class_info
+
+    if updated_classlist:
+        # post each class update to Google group
+
+        # write classlist to dept.json in CLASSLIST_DIR
+        fname = f"{CLASSLIST_DIR}{department}.json"
+        with open(fname, "w") as f:
+            json.dump(classlist, f)
+        prev_classlist[department] = classlist
+
+        # upload dept.json to Cloud Storage
+
+    return jsonify(classlist)
 
 
 # This function handles request from local Flask server
