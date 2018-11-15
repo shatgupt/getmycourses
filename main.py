@@ -7,9 +7,11 @@ from http.cookiejar import CookieJar
 
 import lxml.html
 from flask import Flask, abort, jsonify
+from google.cloud import storage
 from lxml.cssselect import CSSSelector
 
-CLASSLIST_DIR = "/tmp/classlist/"
+CLASSLIST_DIR = "classlist/"
+FULL_CLASSLIST_DIR = f"/tmp/{CLASSLIST_DIR}"
 CURRENT_TERM = "2191"  # Spring 2019
 ASU_BASE_URL = "https://webapp4.asu.edu"
 HEADERS = {
@@ -32,20 +34,32 @@ opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 
 app = Flask(__name__)
 prev_classlist = {}
+bucket = None
+if os.environ.get("CLOUD_STORAGE_BUCKET"):
+    bucket = storage.Client().get_bucket(os.environ.get("CLOUD_STORAGE_BUCKET"))
 
-if not os.path.isdir(CLASSLIST_DIR):
-    os.mkdir(CLASSLIST_DIR)
+if not os.path.isdir(FULL_CLASSLIST_DIR):
+    os.mkdir(FULL_CLASSLIST_DIR)
 
 
 def load_previous_data(department):
-    fname = f"{CLASSLIST_DIR}{department}.json"
+    fname = f"{department}.json"
+    local_path = f"{FULL_CLASSLIST_DIR}{fname}"
 
-    if not os.path.isfile(fname):
-        # try to download from Cloud Storage
-        logging.info(f"Downloading previous data from Storage: {department}.json")
+    # try to download from Cloud Storage if not present locally
+    if not os.path.isfile(local_path):
+        logging.info(f"prev_classlist NOT present.")
+        if bucket:
+            logging.info(f"Downloading previous data from Storage: {fname}")
+            try:
+                blob = bucket.blob(f"{CLASSLIST_DIR}{fname}")
+                blob.download_to_filename(local_path)
+            except Exception as e:
+                logging.warn(f"Downloading from Cloud Storage failed with error: {e}")
+                return
 
     try:
-        with open(fname) as f:
+        with open(local_path) as f:
             prev_classlist[department] = json.load(f)
     except Exception as e:
         logging.warn(f"Couldn't load json {fname} with error: {e}")
@@ -157,15 +171,23 @@ def handle_get_classlist(request):
             updated_classlist[class_num] = class_info
 
     if updated_classlist:
+        logging.info(f"Updated classes: {updated_classlist}")
         # post each class update to Google group
 
         # write classlist to dept.json in CLASSLIST_DIR
-        fname = f"{CLASSLIST_DIR}{department}.json"
-        with open(fname, "w") as f:
+        fname = f"{department}.json"
+        local_path = f"{FULL_CLASSLIST_DIR}{fname}"
+        with open(local_path, "w") as f:
             json.dump(classlist, f)
         prev_classlist[department] = classlist
 
         # upload dept.json to Cloud Storage
+        if bucket:
+            try:
+                blob = bucket.blob(f"{CLASSLIST_DIR}{fname}")
+                blob.upload_from_filename(local_path)
+            except Exception as e:
+                logging.warn(f"Uploading to Cloud Storage failed with error: {e}")
 
     return jsonify(classlist)
 
