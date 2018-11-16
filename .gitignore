@@ -1,4 +1,4 @@
 .DS_Store
 
 # temp file
-tp.py
+tp*.py

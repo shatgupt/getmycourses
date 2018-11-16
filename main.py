@@ -1,7 +1,10 @@
+import email.message
 import json
 import logging
 import os
 import re
+import shutil
+import smtplib
 import urllib.request
 from http.cookiejar import CookieJar
 
@@ -10,7 +13,7 @@ from flask import Flask, abort, jsonify
 from google.cloud import storage
 from lxml.cssselect import CSSSelector
 
-CLASSLIST_DIR = "classlist/"
+CLASSLIST_DIR = "classlist-responses/"
 FULL_CLASSLIST_DIR = f"/tmp/{CLASSLIST_DIR}"
 CURRENT_TERM = "2191"  # Spring 2019
 ASU_BASE_URL = "https://webapp4.asu.edu"
@@ -28,6 +31,16 @@ HEADERS = {
     "Connection": "keep-alive",
 }
 
+INFO_STRINGS = {
+    "course": "Course",
+    "dates": "Dates",
+    "instructor": "Instructor",
+    "non_reserved_open_seats": "Non Reserved Open Seats",
+    "open_seats": "Open Seats",
+    "title": "Title",
+    "total_seats": "Total Seats",
+}
+
 # Initialize things for making requests to ASU webapp
 cj = CookieJar()
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
@@ -38,8 +51,55 @@ bucket = None
 if os.environ.get("CLOUD_STORAGE_BUCKET"):
     bucket = storage.Client().get_bucket(os.environ.get("CLOUD_STORAGE_BUCKET"))
 
-if not os.path.isdir(FULL_CLASSLIST_DIR):
-    os.mkdir(FULL_CLASSLIST_DIR)
+# Recreate the classlist dir to remove old files
+if os.path.isdir(FULL_CLASSLIST_DIR):
+    shutil.rmtree(FULL_CLASSLIST_DIR)
+os.mkdir(FULL_CLASSLIST_DIR)
+
+
+def email_to_group(class_num, info):
+    password = os.environ.get("EMAIL_LOGIN_PASSWORD")
+    if not password:
+        logging.warn(f"Not sending email as no login password set")
+        return
+
+    msg = email.message.Message()
+    msg[
+        "Subject"
+    ] = f"[{class_num}] {info['course']}: {info['title']} - {info['instructor']}"
+    msg["From"] = os.environ.get("FROM_GROUP_EMAIL")
+    msg["To"] = os.environ.get("TO_GROUP_EMAIL")
+    msg.add_header("Content-Type", 'text/html; charset="UTF-8"')
+    email_content = [
+        "<h2>Class updated:</h2>",
+        '<table style="text-align: center; border: 1px solid black;">',
+        "<tr>",
+        "\n".join(
+            (
+                '<th style="font-weight: bold; border-right: 1px solid black; border-'
+                f'bottom: 1px solid black; padding: 5px;">{INFO_STRINGS[k]}</th>'
+            )
+            for k in info
+        ),
+        "</tr>",
+        "<tr>",
+        "\n".join(
+            f'<td style="border-right: 1px solid black; padding: 5px;">{v}</td>'
+            for k, v in info.items()
+        ),
+        "</tr>",
+        "</table>",
+    ]
+    msg.set_payload("\n".join(email_content))
+
+    try:
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+        server.ehlo()
+        server.login(msg["From"], password)
+        server.sendmail(msg["From"], [msg["To"]], msg.as_string())
+        server.close()
+    except Exception as e:
+        logging.error(f"Send email error: {e}")
 
 
 def load_previous_data(department):
@@ -48,7 +108,7 @@ def load_previous_data(department):
 
     # try to download from Cloud Storage if not present locally
     if not os.path.isfile(local_path):
-        logging.info(f"prev_classlist NOT present.")
+        logging.info(f"{fname} NOT present locally.")
         if bucket:
             logging.info(f"Downloading previous data from Storage: {fname}")
             try:
@@ -93,7 +153,7 @@ def extract_class_seats(html):
 
 def extract_classlist_seats(column):
     text = column.text_content().strip().split()
-    seats = {"open_seats": text[0], "total_seats": text[2]}
+    seats = {"total_seats": text[2], "open_seats": text[0]}
     # extract reserved seats info
     get_reserve = CSSSelector("span.rsrvtip")
     reserve = get_reserve(column)
@@ -173,6 +233,8 @@ def handle_get_classlist(request):
     if updated_classlist:
         logging.info(f"Updated classes: {updated_classlist}")
         # post each class update to Google group
+        for class_num, class_info in updated_classlist.items():
+            email_to_group(class_num, class_info)
 
         # write classlist to dept.json in CLASSLIST_DIR
         fname = f"{department}.json"
