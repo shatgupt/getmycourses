@@ -84,7 +84,10 @@ def email_to_group(class_num, info):
         "</tr>",
         "<tr>",
         "\n".join(
-            f'<td style="border-right: 1px solid black; padding: 5px;">{v}</td>'
+            (
+                '<td style="border-right: 1px solid black; padding: 5px;">'
+                f'<a href="{ASU_BASE_URL}/catalog/course?r={class_num}">{v}</a></td>'
+            )
             for k, v in info.items()
         ),
         "</tr>",
@@ -228,9 +231,11 @@ def handle_get_classlist(request):
     # check if there is any updated class
     for class_num, class_info in classlist.items():
         prev_class_info = prev_classlist[department].get(class_num, {})
-        if class_info.get("open_seats") != prev_class_info.get("open_seats") or \
-                class_info.get("non_reserved_open_seats") != \
-                prev_class_info.get("non_reserved_open_seats"):
+        prev_nros = prev_class_info.get("non_reserved_open_seats")
+        if (
+            class_info.get("open_seats") != prev_class_info.get("open_seats")
+            or class_info.get("non_reserved_open_seats") != prev_nros
+        ):
             updated_classlist[class_num] = class_info
 
     if updated_classlist:
