@@ -51,7 +51,7 @@ bucket = None
 if os.environ.get("CLOUD_STORAGE_BUCKET"):
     bucket = storage.Client().get_bucket(os.environ.get("CLOUD_STORAGE_BUCKET"))
 
-# Recreate the classlist dir to remove old files
+# Recreate the classlist dir to remove old local files
 if os.path.isdir(FULL_CLASSLIST_DIR):
     shutil.rmtree(FULL_CLASSLIST_DIR)
 os.mkdir(FULL_CLASSLIST_DIR)
@@ -227,11 +227,15 @@ def handle_get_classlist(request):
     updated_classlist = {}
     # check if there is any updated class
     for class_num, class_info in classlist.items():
-        if class_info != prev_classlist[department].get(class_num):
+        prev_class_info = prev_classlist[department].get(class_num, {})
+        if class_info.get("open_seats") != prev_class_info.get("open_seats") or \
+                class_info.get("non_reserved_open_seats") != \
+                prev_class_info.get("non_reserved_open_seats"):
             updated_classlist[class_num] = class_info
 
     if updated_classlist:
         logging.info(f"Updated classes: {updated_classlist}")
+        # app.logger.error(f"Updated classes: {updated_classlist}")
         # post each class update to Google group
         for class_num, class_info in updated_classlist.items():
             email_to_group(class_num, class_info)
