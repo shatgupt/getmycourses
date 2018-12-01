@@ -231,11 +231,16 @@ def handle_get_classlist(request):
     # check if there is any updated class
     for class_num, class_info in classlist.items():
         prev_class_info = prev_classlist[department].get(class_num, {})
-        prev_nros = prev_class_info.get("non_reserved_open_seats")
-        if (
-            class_info.get("open_seats") != prev_class_info.get("open_seats")
-            or class_info.get("non_reserved_open_seats") != prev_nros
-        ):
+        prev_os = int(prev_class_info.get("open_seats", -1))
+        cur_os = int(class_info.get("open_seats", -1))
+        prev_nros = int(prev_class_info.get("non_reserved_open_seats", -1))
+        cur_nros = int(class_info.get("non_reserved_open_seats", -1))
+        # We prefer tracking updates only for non_reserved_open_seats, if present,
+        # otherwise open_seats
+        if cur_nros >= 0:  # this should mean that reservation info was present
+            if cur_nros != prev_nros:
+                updated_classlist[class_num] = class_info
+        elif cur_os != prev_os:  # implicit that there was no reservation
             updated_classlist[class_num] = class_info
 
     if updated_classlist:
