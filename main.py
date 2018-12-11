@@ -171,8 +171,7 @@ def extract_classlist_seats(column):
     return seats
 
 
-def extract_classlist_info(html):
-    tree = lxml.html.fromstring(html)
+def extract_classlist_info(tree):
     get_table = CSSSelector("table#CatalogList")
     table = get_table(tree)
     if not table:
@@ -202,6 +201,32 @@ def extract_classlist_info(html):
     return classlist
 
 
+# get all classses for a department, taking care of pagination
+def get_all_classes(department):
+    page = 1
+    filters = f"t={CURRENT_TERM}&hon=F&promod=F&e=all&s={department}&page=%d"
+    url = f"{ASU_BASE_URL}/catalog/myclasslistresults?{filters}"
+    html = get_html(url % page)
+    tree = lxml.html.fromstring(html)
+    classlist = extract_classlist_info(tree)
+
+    # check if more pages in result
+    pages = 1
+    get_pages = CSSSelector(".pagination>li")
+    page_list = get_pages(tree)
+    # if only 1 page, then only 1 li
+    # if more than 1 page, there will also be next button
+    if len(page_list) > 2:
+        pages = len(page_list) - 1
+
+    for page in range(2, pages + 1):
+        html = get_html(url % page)
+        tree = lxml.html.fromstring(html)
+        classlist = {**classlist, **extract_classlist_info(tree)}
+
+    return classlist
+
+
 # https://webapp4.asu.edu/catalog/coursedetails?r=30298
 def handle_get_class(request):
     class_num = request.args.get("class")
@@ -223,9 +248,7 @@ def handle_get_classlist(request):
         prev_classlist[department] = {}
         load_previous_data(department)
 
-    filters = f"t={CURRENT_TERM}&l=grad&hon=F&promod=F&e=all&s={department}&page=1"
-    html = get_html(f"{ASU_BASE_URL}/catalog/myclasslistresults?{filters}")
-    classlist = extract_classlist_info(html)
+    classlist = get_all_classes(department)
 
     updated_classlist = {}
     # check if there is any updated class
@@ -244,6 +267,7 @@ def handle_get_classlist(request):
             updated_classlist[class_num] = class_info
 
     if updated_classlist:
+        logging.info(f"Num Updated classes: {len(updated_classlist)}")
         logging.info(f"Updated classes: {updated_classlist}")
         # app.logger.error(f"Updated classes: {updated_classlist}")
         # post each class update to Google group
