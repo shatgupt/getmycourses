@@ -32,6 +32,7 @@ HEADERS = {
 }
 
 INFO_STRINGS = {
+    "class_num": "Class #",
     "course": "Course",
     "dates": "Dates",
     "instructor": "Instructor",
@@ -190,6 +191,7 @@ def extract_classlist_info(tree):
         columns = get_columns(row)
         class_num = " ".join(columns[2].text_content().split())
         classlist[class_num] = {
+            "class_num": class_num,
             "course": " ".join(columns[0].text_content().split()),
             "title": " ".join(columns[1].text_content().split()),
             "instructor": " ".join(columns[3].text_content().split()),
