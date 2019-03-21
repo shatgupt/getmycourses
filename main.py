@@ -15,7 +15,7 @@ from lxml.cssselect import CSSSelector
 
 CLASSLIST_DIR = "classlist-responses/"
 FULL_CLASSLIST_DIR = f"/tmp/{CLASSLIST_DIR}"
-CURRENT_TERM = "2191"  # Spring 2019
+CURRENT_TERM = os.environ.get("CURRENT_TERM")  # "2197"  # Fall 2019
 ASU_BASE_URL = "https://webapp4.asu.edu"
 HEADERS = {
     "User-Agent": (
