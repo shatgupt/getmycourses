@@ -6,7 +6,7 @@
     "terminal.integrated.shell.windows": "C:/WINDOWS/System32/wsl.exe",
     "python.formatting.provider": "black",
     "python.linting.flake8Enabled": true,
-    "python.pythonPath": "~/.virtualenvs/getmycourses/Scripts/python.exe",
+    "python.pythonPath": "C:\\Python37\\python.exe",
     "[python]": {
         "editor.codeActionsOnSave": {
             "source.organizeImports": true

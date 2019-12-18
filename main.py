@@ -13,9 +13,10 @@ from flask import Flask, abort, jsonify
 from google.cloud import storage
 from lxml.cssselect import CSSSelector
 
-CLASSLIST_DIR = "classlist-responses/"
-FULL_CLASSLIST_DIR = f"/tmp/{CLASSLIST_DIR}"
-CURRENT_TERM = os.environ.get("CURRENT_TERM")  # "2197"  # Fall 2019
+CURRENT_TERM = os.environ.get("CURRENT_TERM", "2201")  # "2201"  # Spring 2020
+TEMP_DIR = os.environ.get("TEMP", "/tmp")
+CLASSLIST_DIR = "classlist-responses"
+FULL_CLASSLIST_DIR = os.path.join(TEMP_DIR, CLASSLIST_DIR, CURRENT_TERM)
 ASU_BASE_URL = "https://webapp4.asu.edu"
 HEADERS = {
     "User-Agent": (
@@ -55,7 +56,7 @@ if os.environ.get("CLOUD_STORAGE_BUCKET"):
 # Recreate the classlist dir to remove old local files
 if os.path.isdir(FULL_CLASSLIST_DIR):
     shutil.rmtree(FULL_CLASSLIST_DIR)
-os.mkdir(FULL_CLASSLIST_DIR)
+os.makedirs(FULL_CLASSLIST_DIR, exist_ok=True)
 
 
 def email_to_group(class_num, info):
@@ -108,7 +109,7 @@ def email_to_group(class_num, info):
 
 def load_previous_data(department):
     fname = f"{department}.json"
-    local_path = f"{FULL_CLASSLIST_DIR}{fname}"
+    local_path = os.path.join(FULL_CLASSLIST_DIR, fname)
 
     # try to download from Cloud Storage if not present locally
     if not os.path.isfile(local_path):
@@ -116,7 +117,7 @@ def load_previous_data(department):
         if bucket:
             logging.info(f"Downloading previous data from Storage: {fname}")
             try:
-                blob = bucket.blob(f"{CLASSLIST_DIR}{fname}")
+                blob = bucket.blob(f"{CLASSLIST_DIR}/term-{CURRENT_TERM}/{fname}")
                 blob.download_to_filename(local_path)
             except Exception as e:
                 logging.warn(f"Downloading from Cloud Storage failed with error: {e}")
@@ -126,7 +127,7 @@ def load_previous_data(department):
         with open(local_path) as f:
             prev_classlist[department] = json.load(f)
     except Exception as e:
-        logging.warn(f"Couldn't load json {fname} with error: {e}")
+        logging.warning(f"Couldn't load json {fname} with error: {e}")
 
 
 def get_html(url):
@@ -204,9 +205,12 @@ def extract_classlist_info(tree):
 
 
 # get all classses for a department, taking care of pagination
-def get_all_classes(department):
+def get_all_classes(department, level):
     page = 1
     filters = f"t={CURRENT_TERM}&hon=F&promod=F&e=all&s={department}&page=%d"
+    # filter by course level
+    if level is not None:
+        filters += f"&l={level}"
     url = f"{ASU_BASE_URL}/catalog/myclasslistresults?{filters}"
     html = get_html(url % page)
     tree = lxml.html.fromstring(html)
@@ -244,13 +248,14 @@ def handle_get_class(request):
 # https://webapp4.asu.edu/catalog/classlist?e=all&l=grad&s=CSE
 def handle_get_classlist(request):
     department = request.args.get("department")
+    level = request.args.get("level")
     if not department:
         return abort(400)
     if not prev_classlist.get(department):
         prev_classlist[department] = {}
         load_previous_data(department)
 
-    classlist = get_all_classes(department)
+    classlist = get_all_classes(department, level)
 
     updated_classlist = {}
     # check if there is any updated class
@@ -278,7 +283,7 @@ def handle_get_classlist(request):
 
         # write classlist to dept.json in CLASSLIST_DIR
         fname = f"{department}.json"
-        local_path = f"{FULL_CLASSLIST_DIR}{fname}"
+        local_path = os.path.join(FULL_CLASSLIST_DIR, fname)
         with open(local_path, "w") as f:
             json.dump(classlist, f)
         prev_classlist[department] = classlist
@@ -286,7 +291,7 @@ def handle_get_classlist(request):
         # upload dept.json to Cloud Storage
         if bucket:
             try:
-                blob = bucket.blob(f"{CLASSLIST_DIR}{fname}")
+                blob = bucket.blob(f"{CLASSLIST_DIR}/term-{CURRENT_TERM}/{fname}")
                 blob.upload_from_filename(local_path)
             except Exception as e:
                 logging.warn(f"Uploading to Cloud Storage failed with error: {e}")
@@ -325,4 +330,4 @@ def get_class(request):
 
 
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
