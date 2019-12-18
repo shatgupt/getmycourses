@@ -16,7 +16,8 @@ from lxml.cssselect import CSSSelector
 CURRENT_TERM = os.environ.get("CURRENT_TERM", "2201")  # "2201"  # Spring 2020
 TEMP_DIR = os.environ.get("TEMP", "/tmp")
 CLASSLIST_DIR = "classlist-responses"
-FULL_CLASSLIST_DIR = os.path.join(TEMP_DIR, CLASSLIST_DIR, CURRENT_TERM)
+LOCAL_CLASSLIST_DIR = os.path.join(TEMP_DIR, CLASSLIST_DIR, CURRENT_TERM)
+CLOUD_CLASSLIST_DIR = f"{CLASSLIST_DIR}/{CURRENT_TERM}"
 ASU_BASE_URL = "https://webapp4.asu.edu"
 HEADERS = {
     "User-Agent": (
@@ -54,15 +55,15 @@ if os.environ.get("CLOUD_STORAGE_BUCKET"):
     bucket = storage.Client().get_bucket(os.environ.get("CLOUD_STORAGE_BUCKET"))
 
 # Recreate the classlist dir to remove old local files
-if os.path.isdir(FULL_CLASSLIST_DIR):
-    shutil.rmtree(FULL_CLASSLIST_DIR)
-os.makedirs(FULL_CLASSLIST_DIR, exist_ok=True)
+if os.path.isdir(LOCAL_CLASSLIST_DIR):
+    shutil.rmtree(LOCAL_CLASSLIST_DIR)
+os.makedirs(LOCAL_CLASSLIST_DIR, exist_ok=True)
 
 
 def email_to_group(class_num, info):
     password = os.environ.get("EMAIL_LOGIN_PASSWORD")
     if not password:
-        logging.warn(f"Not sending email as no login password set")
+        logging.warning(f"Not sending email as no login password set")
         return
 
     msg = email.message.Message()
@@ -109,18 +110,18 @@ def email_to_group(class_num, info):
 
 def load_previous_data(department):
     fname = f"{department}.json"
-    local_path = os.path.join(FULL_CLASSLIST_DIR, fname)
+    local_path = os.path.join(LOCAL_CLASSLIST_DIR, fname)
 
     # try to download from Cloud Storage if not present locally
     if not os.path.isfile(local_path):
         logging.info(f"{fname} NOT present locally.")
         if bucket:
-            logging.info(f"Downloading previous data from Storage: {fname}")
+            logging.info(f"Downloading previous data from Cloud Storage: {fname}")
             try:
-                blob = bucket.blob(f"{CLASSLIST_DIR}/term-{CURRENT_TERM}/{fname}")
+                blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{fname}")
                 blob.download_to_filename(local_path)
             except Exception as e:
-                logging.warn(f"Downloading from Cloud Storage failed with error: {e}")
+                logging.warning(f"Downloading from Cloud Storage failed with error: {e}")
                 return
 
     try:
@@ -283,7 +284,7 @@ def handle_get_classlist(request):
 
         # write classlist to dept.json in CLASSLIST_DIR
         fname = f"{department}.json"
-        local_path = os.path.join(FULL_CLASSLIST_DIR, fname)
+        local_path = os.path.join(LOCAL_CLASSLIST_DIR, fname)
         with open(local_path, "w") as f:
             json.dump(classlist, f)
         prev_classlist[department] = classlist
@@ -291,10 +292,10 @@ def handle_get_classlist(request):
         # upload dept.json to Cloud Storage
         if bucket:
             try:
-                blob = bucket.blob(f"{CLASSLIST_DIR}/term-{CURRENT_TERM}/{fname}")
+                blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{fname}")
                 blob.upload_from_filename(local_path)
             except Exception as e:
-                logging.warn(f"Uploading to Cloud Storage failed with error: {e}")
+                logging.warning(f"Uploading to Cloud Storage failed with error: {e}")
 
     return jsonify(classlist)
 
