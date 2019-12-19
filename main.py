@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import smtplib
+import time
 import urllib.request
 from http.cookiejar import CookieJar
 
@@ -13,12 +14,14 @@ from flask import Flask, abort, jsonify
 from google.cloud import storage
 from lxml.cssselect import CSSSelector
 
+EMAIL_SLEEP_INTERVAL = 60
 CURRENT_TERM = os.environ.get("CURRENT_TERM", "2201")  # "2201"  # Spring 2020
 TEMP_DIR = os.environ.get("TEMP", "/tmp")
 CLASSLIST_DIR = "classlist-responses"
 LOCAL_CLASSLIST_DIR = os.path.join(TEMP_DIR, CLASSLIST_DIR, CURRENT_TERM)
 CLOUD_CLASSLIST_DIR = f"{CLASSLIST_DIR}/{CURRENT_TERM}"
 ASU_BASE_URL = "https://webapp4.asu.edu"
+COURSE_FILE = "courses.json"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit"
@@ -98,37 +101,59 @@ def email_to_group(class_num, info):
     ]
     msg.set_payload("\n".join(email_content))
 
-    try:
-        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
-        server.ehlo()
-        server.login(msg["From"], password)
-        server.sendmail(msg["From"], [msg["To"]], msg.as_string())
-        server.close()
-    except Exception as e:
-        logging.error(f"Send email error: {e}")
+    # We are not putting it within try-catch to let it raise an exception
+    # This exception will let us sleep if we hit max email sending limits
+    server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+    server.ehlo()
+    server.login(msg["From"], password)
+    server.sendmail(msg["From"], [msg["To"]], msg.as_string())
+    server.close()
 
 
 def load_previous_data(department):
-    fname = f"{department}.json"
-    local_path = os.path.join(LOCAL_CLASSLIST_DIR, fname)
-
-    # try to download from Cloud Storage if not present locally
-    if not os.path.isfile(local_path):
-        logging.info(f"{fname} NOT present locally.")
-        if bucket:
-            logging.info(f"Downloading previous data from Cloud Storage: {fname}")
+    local_path = os.path.join(LOCAL_CLASSLIST_DIR, department, COURSE_FILE)
+    if not bucket:
+        logging.warning(
+            "No Cloud Storage bucket configured. Not downloading any previous data."
+        )
+    else:
+        # try to download from Cloud Storage if not present locally
+        if not os.path.isfile(local_path):
+            logging.info(f"{COURSE_FILE} NOT present locally.")
+            logging.info(f"Downloading previous data from Cloud Storage: {COURSE_FILE}")
             try:
-                blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{fname}")
+                blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{department}/{COURSE_FILE}")
+                os.makedirs(
+                    os.path.join(LOCAL_CLASSLIST_DIR, department), exist_ok=True
+                )
                 blob.download_to_filename(local_path)
             except Exception as e:
-                logging.warning(f"Downloading from Cloud Storage failed with error: {e}")
-                return
+                logging.warning(
+                    f"Downloading from Cloud Storage failed with error: {e}"
+                )
 
     try:
         with open(local_path) as f:
             prev_classlist[department] = json.load(f)
     except Exception as e:
-        logging.warning(f"Couldn't load json {fname} with error: {e}")
+        logging.warning(f"Couldn't load json {COURSE_FILE} with error: {e}")
+
+
+def save_json(department, classlist):
+    # write classlist to dept.json in CLASSLIST_DIR
+    os.makedirs(os.path.join(LOCAL_CLASSLIST_DIR, department), exist_ok=True)
+    local_path = os.path.join(LOCAL_CLASSLIST_DIR, department, COURSE_FILE)
+    with open(local_path, "w") as f:
+        json.dump(classlist, f)
+    prev_classlist[department] = classlist
+
+    # upload dept.json to Cloud Storage
+    if bucket:
+        try:
+            blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{department}/{COURSE_FILE}")
+            blob.upload_from_filename(local_path)
+        except Exception as e:
+            logging.warning(f"Uploading to Cloud Storage failed with error: {e}")
 
 
 def get_html(url):
@@ -259,9 +284,10 @@ def handle_get_classlist(request):
     classlist = get_all_classes(department, level)
 
     updated_classlist = {}
+    prev_dept_classlist = prev_classlist[department]
     # check if there is any updated class
     for class_num, class_info in classlist.items():
-        prev_class_info = prev_classlist[department].get(class_num, {})
+        prev_class_info = prev_dept_classlist.get(class_num, {})
         prev_os = int(prev_class_info.get("open_seats", -1))
         cur_os = int(class_info.get("open_seats", -1))
         prev_nros = int(prev_class_info.get("non_reserved_open_seats", -1))
@@ -274,28 +300,30 @@ def handle_get_classlist(request):
         elif cur_os != prev_os:  # implicit that there was no reservation
             updated_classlist[class_num] = class_info
 
+    emailed_classlist = {}
     if updated_classlist:
         logging.info(f"Num Updated classes: {len(updated_classlist)}")
         logging.info(f"Updated classes: {updated_classlist}")
-        # app.logger.error(f"Updated classes: {updated_classlist}")
+        # logging.error(f"Updated classes: {updated_classlist}")
         # post each class update to Google group
-        for class_num, class_info in updated_classlist.items():
-            email_to_group(class_num, class_info)
-
-        # write classlist to dept.json in CLASSLIST_DIR
-        fname = f"{department}.json"
-        local_path = os.path.join(LOCAL_CLASSLIST_DIR, fname)
-        with open(local_path, "w") as f:
-            json.dump(classlist, f)
-        prev_classlist[department] = classlist
-
-        # upload dept.json to Cloud Storage
-        if bucket:
+        for idx, (class_num, class_info) in enumerate(updated_classlist.items()):
             try:
-                blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{fname}")
-                blob.upload_from_filename(local_path)
+                email_to_group(class_num, class_info)
             except Exception as e:
-                logging.warning(f"Uploading to Cloud Storage failed with error: {e}")
+                logging.warning(f"Email sending error: {e}")
+                # If it crashes further, make sure to save the progress till now so that we can resume.
+                save_json(department, emailed_classlist)
+                logging.warning(
+                    f"Sleeping for {EMAIL_SLEEP_INTERVAL} seconds on {idx+1}th update."
+                )
+                time.sleep(EMAIL_SLEEP_INTERVAL)
+                # Try again for this update after sleeping.
+                # If it fails now, the error is probably irrecoverable anyway.
+                email_to_group(class_num, class_info)
+            emailed_classlist[class_num] = class_info
+
+        # Save final classlist
+        save_json(department, classlist)
 
     return jsonify(classlist)
 
