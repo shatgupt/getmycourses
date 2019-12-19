@@ -40,6 +40,8 @@ INFO_STRINGS = {
     "class_num": "Class #",
     "course": "Course",
     "dates": "Dates",
+    "days": "Days",
+    "time": "Time",
     "instructor": "Instructor",
     "non_reserved_open_seats": "Non Reserved Open Seats",
     "open_seats": "Open Seats",
@@ -68,11 +70,14 @@ def email_to_group(class_num, info):
     if not password:
         logging.warning(f"Not sending email as no login password set")
         return
+    if not info["days"]:
+        logging.warning(f"Not sending email as 'Days' not set for class: {class_num}")
+        return
 
     msg = email.message.Message()
     msg[
         "Subject"
-    ] = f"[{class_num}] {info['course']}: {info['title']} - {info['instructor']}"
+    ] = f"[{class_num}] {info['course']}: {info['title']} - {info['instructor']} [{info['days']} / {info['time']}]"
     msg["From"] = os.environ.get("FROM_GROUP_EMAIL")
     msg["To"] = os.environ.get("TO_GROUP_EMAIL")
     msg.add_header("Content-Type", 'text/html; charset="UTF-8"')
@@ -164,6 +169,13 @@ def get_html(url):
     return content.decode()
 
 
+def get_clean_text(html):
+    """
+    Removes extra blank spaces and nbsp from html text.
+    """
+    return " ".join(html.text_content().split())
+
+
 def extract_class_seats(html):
     matches = re.findall(
         (
@@ -216,13 +228,15 @@ def extract_classlist_info(tree):
     classlist = {}
     for row in rows:
         columns = get_columns(row)
-        class_num = " ".join(columns[2].text_content().split())
+        class_num = get_clean_text(columns[2])
         classlist[class_num] = {
             "class_num": class_num,
-            "course": " ".join(columns[0].text_content().split()),
-            "title": " ".join(columns[1].text_content().split()),
-            "instructor": " ".join(columns[3].text_content().split()),
-            "dates": " ".join(columns[8].text_content().split()),
+            "course": get_clean_text(columns[0]),
+            "title": get_clean_text(columns[1]),
+            "instructor": get_clean_text(columns[3]),
+            "dates": get_clean_text(columns[8]),
+            "days": get_clean_text(columns[4]),
+            "time": f"{get_clean_text(columns[5])} - {get_clean_text(columns[6])}",
         }
         seats = extract_classlist_seats(columns[10])
         classlist[class_num] = {**classlist[class_num], **seats}
