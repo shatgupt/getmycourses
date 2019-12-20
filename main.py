@@ -5,7 +5,6 @@ import os
 import re
 import shutil
 import smtplib
-import time
 import urllib.request
 from http.cookiejar import CookieJar
 
@@ -14,7 +13,6 @@ from flask import Flask, abort, jsonify
 from google.cloud import storage
 from lxml.cssselect import CSSSelector
 
-EMAIL_SLEEP_INTERVAL = 60
 CURRENT_TERM = os.environ.get("CURRENT_TERM", "2201")  # "2201"  # Spring 2020
 TEMP_DIR = os.environ.get("TEMP", "/tmp")
 CLASSLIST_DIR = "classlist-responses"
@@ -22,6 +20,7 @@ LOCAL_CLASSLIST_DIR = os.path.join(TEMP_DIR, CLASSLIST_DIR, CURRENT_TERM)
 CLOUD_CLASSLIST_DIR = f"{CLASSLIST_DIR}/{CURRENT_TERM}"
 ASU_BASE_URL = "https://webapp4.asu.edu"
 COURSE_FILE = "courses.json"
+TEMP_FILE_SUFFIX = ".temp"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit"
@@ -49,15 +48,16 @@ INFO_STRINGS = {
     "total_seats": "Total Seats",
 }
 
-# Initialize things for making requests to ASU webapp
-cj = CookieJar()
-opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-
+# These global variables are persisted across Google Cloud function executions (non-cold-start ones)
 app = Flask(__name__)
 prev_classlist = {}
 bucket = None
 if os.environ.get("CLOUD_STORAGE_BUCKET"):
     bucket = storage.Client().get_bucket(os.environ.get("CLOUD_STORAGE_BUCKET"))
+
+# Initialize things for making requests to ASU webapp
+cj = CookieJar()
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
 
 # Recreate the classlist dir to remove old local files
 if os.path.isdir(LOCAL_CLASSLIST_DIR):
@@ -117,37 +117,56 @@ def email_to_group(class_num, info):
 
 def load_previous_data(department):
     local_path = os.path.join(LOCAL_CLASSLIST_DIR, department, COURSE_FILE)
-    if not bucket:
-        logging.warning(
-            "No Cloud Storage bucket configured. Not downloading any previous data."
-        )
-    else:
-        # try to download from Cloud Storage if not present locally
-        if not os.path.isfile(local_path):
-            logging.info(f"{COURSE_FILE} NOT present locally.")
-            logging.info(f"Downloading previous data from Cloud Storage: {COURSE_FILE}")
-            try:
-                blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{department}/{COURSE_FILE}")
-                os.makedirs(
-                    os.path.join(LOCAL_CLASSLIST_DIR, department), exist_ok=True
-                )
+    local_temp_path = local_path + TEMP_FILE_SUFFIX
+
+    # try to download from Cloud Storage if not present locally
+    if not (os.path.isfile(local_path) or os.path.isfile(local_temp_path)):
+        logging.info(f"{COURSE_FILE} NOT present locally.")
+        if not bucket:
+            logging.warning(
+                "No Cloud Storage bucket configured. Not downloading any previous data."
+            )
+            return
+        logging.info(f"Downloading previous data from Cloud Storage: {COURSE_FILE}")
+        os.makedirs(os.path.join(LOCAL_CLASSLIST_DIR, department), exist_ok=True)
+        cloud_path = f"{CLOUD_CLASSLIST_DIR}/{department}/{COURSE_FILE}"
+        cloud_temp_path = cloud_path + TEMP_FILE_SUFFIX
+        try:
+            blob = bucket.blob(cloud_path)
+            if blob.exists():
                 blob.download_to_filename(local_path)
-            except Exception as e:
-                logging.warning(
-                    f"Downloading from Cloud Storage failed with error: {e}"
-                )
+            else:
+                blob = bucket.blob(cloud_temp_path)
+                if blob.exists():
+                    blob.download_to_filename(local_temp_path)
+        except Exception as e:
+            logging.warning(f"Downloading from Cloud Storage failed with error: {e}")
+
+    # Give preference to complete file if present
+    if os.path.isfile(local_path):
+        path = local_path
+    elif os.path.isfile(local_temp_path):
+        path = local_temp_path
+    else:
+        logging.warning("No previous data present.")
+        return
 
     try:
-        with open(local_path) as f:
+        with open(path) as f:
             prev_classlist[department] = json.load(f)
+            logging.info(
+                f"Loaded {len(prev_classlist[department])} classes from previous data"
+            )
     except Exception as e:
         logging.warning(f"Couldn't load json {COURSE_FILE} with error: {e}")
 
 
-def save_json(department, classlist):
+def save_json(department, classlist, temp=False):
     # write classlist to dept.json in CLASSLIST_DIR
     os.makedirs(os.path.join(LOCAL_CLASSLIST_DIR, department), exist_ok=True)
     local_path = os.path.join(LOCAL_CLASSLIST_DIR, department, COURSE_FILE)
+    if temp:
+        local_path += TEMP_FILE_SUFFIX
     with open(local_path, "w") as f:
         json.dump(classlist, f)
     prev_classlist[department] = classlist
@@ -155,7 +174,10 @@ def save_json(department, classlist):
     # upload dept.json to Cloud Storage
     if bucket:
         try:
-            blob = bucket.blob(f"{CLOUD_CLASSLIST_DIR}/{department}/{COURSE_FILE}")
+            cloud_path = f"{CLOUD_CLASSLIST_DIR}/{department}/{COURSE_FILE}"
+            if temp:
+                cloud_path += TEMP_FILE_SUFFIX
+            blob = bucket.blob(cloud_path)
             blob.upload_from_filename(local_path)
         except Exception as e:
             logging.warning(f"Uploading to Cloud Storage failed with error: {e}")
@@ -294,6 +316,10 @@ def handle_get_classlist(request):
     if not prev_classlist.get(department):
         prev_classlist[department] = {}
         load_previous_data(department)
+    else:
+        # This works because prev_classlist is a global variable that is persisted
+        # across Google Cloud function executions (non-cold-start ones)
+        logging.info(f"{len(prev_classlist[department])} classes already loaded.")
 
     classlist = get_all_classes(department, level)
 
@@ -316,7 +342,7 @@ def handle_get_classlist(request):
 
     emailed_classlist = {}
     if updated_classlist:
-        logging.info(f"Num Updated classes: {len(updated_classlist)}")
+        logging.info(f"Number of updated classes: {len(updated_classlist)}")
         logging.info(f"Updated classes: {updated_classlist}")
         # logging.error(f"Updated classes: {updated_classlist}")
         # post each class update to Google group
@@ -324,20 +350,21 @@ def handle_get_classlist(request):
             try:
                 email_to_group(class_num, class_info)
             except Exception as e:
-                logging.warning(f"Email sending error: {e}")
-                # If it crashes further, make sure to save the progress till now so that we can resume.
-                save_json(department, emailed_classlist)
-                logging.warning(
-                    f"Sleeping for {EMAIL_SLEEP_INTERVAL} seconds on {idx+1}th update."
+                logging.warning(f"Email sending error at update {idx+1}: {e}")
+                # Make sure to save temporary progress till now so that we can
+                # resume in next Cloud Function execution
+                save_json(
+                    department, {**prev_dept_classlist, **emailed_classlist}, True
                 )
-                time.sleep(EMAIL_SLEEP_INTERVAL)
-                # Try again for this update after sleeping.
-                # If it fails now, the error is probably irrecoverable anyway.
-                email_to_group(class_num, class_info)
+                raise Exception(
+                    f"Email sending error at update {idx+1}"
+                ).with_traceback(e.__traceback__)
             emailed_classlist[class_num] = class_info
 
-        # Save final classlist
+        # Save final/complete classlist
         save_json(department, classlist)
+    else:
+        logging.info("No updated class.")
 
     return jsonify(classlist)
 
